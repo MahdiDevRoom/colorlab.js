@@ -1,0 +1,12 @@
+{
+  "name": "colorlab",
+  "version": "1.0.0",
+  "license": "MIT",
+  "author": "MahdiDevRoom",
+  "type": "module",
+  "scripts": {
+    "test": "node test",
+    "dev": "node --watch=src test",
+    "build": "bun run build.js"
+  }
+}
