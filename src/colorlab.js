@@ -34,7 +34,7 @@ export default class ColorLab {
     static #NORMALIZE = NORMALIZE;
     static #EXTRACT = EXTRACT;
 
-    //--- Private Static Methods (Detection & Validation) ---
+    //--- Private Static Methods (Core Logic) -----
     
     static #detectSmart(input) {
         if (typeof input === 'object' && input !== null && !Array.isArray(input)) {
@@ -42,8 +42,9 @@ export default class ColorLab {
             if ('H' in input && 'S' in input && 'L' in input) return 'HSL';
             if ('H' in input && 'S' in input && 'V' in input) return 'HSV';
             if ('C' in input && 'M' in input && 'Y' in input && 'K' in input) return 'CMYK';
-            if ('L' in input && 'a' in input && 'b' in input) return 'OKLAB'; // پشتیبانی از آبجکت OKLAB
-            if ('L' in input && 'C' in input && 'h' in input) return 'OKLCH'; // پشتیبانی از آبجکت OKLCH
+            if ('L' in input && 'a' in input && 'b' in input) return 'OKLAB';
+            if ('L' in input && 'C' in input && 'h' in input) return 'OKLCH';
+            if ('L' in input && 'a' in input && 'b' in input && input.L <= 1) return 'LAB'; // تمایز LAB از OKLAB بر اساس محدوده L
             
             if (typeof input.toHexString === 'function') input = input.toHexString();
             else if (typeof input.toRgbString === 'function') input = input.toRgbString();
@@ -99,7 +100,7 @@ export default class ColorLab {
             if (type === 'CMYK') channels = { C: Number(input.C), M: Number(input.M), Y: Number(input.Y), K: Number(input.K), A: Number(input.A ?? 1) };
             if (type === 'OKLAB')channels = { L: Number(input.L), a: Number(input.a), b: Number(input.b), A: Number(input.A ?? 1) };
             if (type === 'OKLCH')channels = { L: Number(input.L), C: Number(input.C), h: Number(input.h), A: Number(input.A ?? 1) };
-            return channels; // اعتبارسنجی در Extract انجام می‌شود
+            return channels;
         }
 
         if (type === 'KEYWORD') {
@@ -121,13 +122,19 @@ export default class ColorLab {
         if (channels.H !== undefined && channels.L !== undefined) return SRGB.HSL_TO_RGB(channels);
         if (channels.H !== undefined && channels.V !== undefined) return SRGB.HSV_TO_RGB(channels);
         if (channels.C !== undefined && channels.M !== undefined) return SRGB.CMYK_TO_RGB(channels);
-        if (channels.L !== undefined && channels.a !== undefined) return CIE.LAB_TO_RGB(channels); // پشتیبانی از LAB
-        if (channels.L !== undefined && channels.C !== undefined && channels.h !== undefined) return OK.OKLCH_TO_RGB(channels); // پشتیبانی از OKLCH
+        if (channels.a !== undefined) return CIE.LAB_TO_RGB(channels);
+        if (channels.C !== undefined && channels.h !== undefined) return OK.OKLCH_TO_RGB(channels);
 
         return null;
     }
 
-    //--- Public Static Methods (API) -------------------
+    static #rgbToHex(rgb) {
+        if (!rgb) return null;
+        const r = toHex2(rgb.R), g = toHex2(rgb.G), b = toHex2(rgb.B);
+        return rgb.A === 1 ? `#${r}${g}${b}` : `#${r}${g}${b}${toHex2(rgb.A * 255)}`;
+    }
+
+    //--- Public Static Methods (API) -------------
 
     /* 1. Detection & Normalization */
     static detect(input) {
@@ -240,8 +247,7 @@ export default class ColorLab {
         if (Array.isArray(input)) return input.map(i => ColorLab.toHex(i));
         const rgb = ColorLab.#getRgbChannels(input);
         if (!rgb) return null;
-        const r = toHex2(rgb.R), g = toHex2(rgb.G), b = toHex2(rgb.B);
-        return rgb.A === 1 ? `#${r}${g}${b}` : `#${r}${g}${b}${toHex2(rgb.A * 255)}`;
+        return ColorLab.#rgbToHex(rgb);
     }
 
     static toRgb(input) {
@@ -286,13 +292,13 @@ export default class ColorLab {
         return closest.replace(/([A-Z])/g, ' $1').trim();
     }
 
-    /* 5. Modern Color Conversions (OK / CIE) */
+    /* 5. Modern Color Conversions (OK / CIE / P3 / XYZ) */
     static toOklab(input) {
         if (Array.isArray(input)) return input.map(i => ColorLab.toOklab(i));
         const rgb = ColorLab.#getRgbChannels(input);
         if (!rgb) return null;
         const ok = OK.RGB_TO_OKLAB(rgb);
-        return `oklab(${ok.L} ${ok.a} ${ok.b} / ${ok.A})`;
+        return `oklab(${ok.L.toFixed(3)} ${ok.a.toFixed(3)} ${ok.b.toFixed(3)} / ${ok.A})`;
     }
 
     static toOklch(input) {
@@ -300,7 +306,7 @@ export default class ColorLab {
         const rgb = ColorLab.#getRgbChannels(input);
         if (!rgb) return null;
         const ok = OK.RGB_TO_OKLCH(rgb);
-        return `oklch(${ok.L} ${ok.C} ${ok.h}deg / ${ok.A})`;
+        return `oklch(${ok.L.toFixed(3)} ${ok.C.toFixed(3)} ${ok.h.toFixed(1)}deg / ${ok.A})`;
     }
 
     static toOkhsl(input) {
@@ -324,7 +330,7 @@ export default class ColorLab {
         const rgb = ColorLab.#getRgbChannels(input);
         if (!rgb) return null;
         const lab = CIE.RGB_TO_LAB(rgb);
-        return `lab(${lab.L}% ${lab.a} ${lab.b} / ${lab.A})`;
+        return `lab(${lab.L.toFixed(1)}% ${lab.a.toFixed(2)} ${lab.b.toFixed(2)} / ${lab.A})`;
     }
 
     static toLch(input) {
@@ -332,6 +338,147 @@ export default class ColorLab {
         const rgb = ColorLab.#getRgbChannels(input);
         if (!rgb) return null;
         const lch = CIE.RGB_TO_LCH(rgb);
-        return `lch(${lch.L}% ${lch.C} ${lch.h}deg / ${lch.A})`;
+        return `lch(${lch.L.toFixed(1)}% ${lch.C.toFixed(2)} ${lch.h.toFixed(1)}deg / ${lch.A})`;
+    }
+
+    static toP3(input) {
+        if (Array.isArray(input)) return input.map(i => ColorLab.toP3(i));
+        const rgb = ColorLab.#getRgbChannels(input);
+        if (!rgb) return null;
+        const r = (rgb.R / 255).toFixed(3), g = (rgb.G / 255).toFixed(3), b = (rgb.B / 255).toFixed(3);
+        return `color(display-p3 ${r} ${g} ${b} / ${rgb.A})`;
+    }
+
+    static toXyz(input) {
+        if (Array.isArray(input)) return input.map(i => ColorLab.toXyz(i));
+        const rgb = ColorLab.#getRgbChannels(input);
+        if (!rgb) return null;
+        const xyz = CIE.RGB_TO_XYZ(rgb);
+        return `color(xyz ${xyz.X.toFixed(3)} ${xyz.Y.toFixed(3)} ${xyz.Z.toFixed(3)} / ${xyz.A})`;
+    }
+
+    /* 6. Luminance & Contrast (WCAG 2.1) */
+    static getLuminance(input) {
+        const rgb = ColorLab.#getRgbChannels(input);
+        if (!rgb) return null;
+        const toLinear = (c) => { const v = c / 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+        return 0.2126 * toLinear(rgb.R) + 0.7152 * toLinear(rgb.G) + 0.0722 * toLinear(rgb.B);
+    }
+
+    static getContrast(color1, color2) {
+        const lum1 = ColorLab.getLuminance(color1);
+        const lum2 = ColorLab.getLuminance(color2);
+        if (lum1 === null || lum2 === null) return null;
+        const lighter = Math.max(lum1, lum2);
+        const darker = Math.min(lum1, lum2);
+        return parseFloat(((lighter + 0.05) / (darker + 0.05)).toFixed(2));
+    }
+
+    static getContrastLevel(ratio, largeText = false) {
+        if (ratio === null || typeof ratio !== 'number') return 'Fail';
+        if (largeText) {
+            if (ratio >= 4.5) return 'AAA';
+            if (ratio >= 3) return 'AA Large';
+            return 'Fail';
+        }
+        if (ratio >= 7) return 'AAA';
+        if (ratio >= 4.5) return 'AA';
+        return 'Fail';
+    }
+
+    static getBestContrast(input) {
+        const lum = ColorLab.getLuminance(input);
+        if (lum === null) return null;
+        const contrastWhite = (1 + 0.05) / (lum + 0.05);
+        const contrastBlack = (lum + 0.05) / (0 + 0.05);
+        return contrastWhite > contrastBlack ? '#FFFFFF' : '#000000';
+    }
+
+    static isAccessible(color1, color2, level = 'AA', largeText = false) {
+        const ratio = ColorLab.getContrast(color1, color2);
+        if (ratio === null) return false;
+        const thresholds = { 'AA': largeText ? 3 : 4.5, 'AAA': largeText ? 4.5 : 7 };
+        return ratio >= (thresholds[level] || 4.5);
+    }
+
+    /* 7. Color Manipulation (Shading) */
+    static tintHsl(input, amount = 10) {
+        const hsl = ColorLab.getHslChannels(input);
+        if (!hsl) return null;
+        hsl.L = clamp(hsl.L + amount, 0, 100);
+        return ColorLab.#rgbToHex(SRGB.HSL_TO_RGB(hsl));
+    }
+
+    static shadeHsl(input, amount = 10) {
+        const hsl = ColorLab.getHslChannels(input);
+        if (!hsl) return null;
+        hsl.L = clamp(hsl.L - amount, 0, 100);
+        return ColorLab.#rgbToHex(SRGB.HSL_TO_RGB(hsl));
+    }
+
+    static toneHsl(input, amount = 10) {
+        const hsl = ColorLab.getHslChannels(input);
+        if (!hsl) return null;
+        hsl.S = clamp(hsl.S - amount, 0, 100);
+        return ColorLab.#rgbToHex(SRGB.HSL_TO_RGB(hsl));
+    }
+
+    // --- Perceptually Uniform Shading (OKHSL) ---
+    static tintOkhsl(input, amount = 10) {
+        const rgb = ColorLab.#getRgbChannels(input);
+        if (!rgb) return null;
+        const okhsl = OK.RGB_TO_OKHSL(rgb);
+        okhsl.L = clamp(okhsl.L + amount, 0, 100);
+        return ColorLab.#rgbToHex(OK.OKLCH_TO_RGB(OK.OKHSL_TO_OKLCH(okhsl)));
+    }
+
+    static shadeOkhsl(input, amount = 10) {
+        const rgb = ColorLab.#getRgbChannels(input);
+        if (!rgb) return null;
+        const okhsl = OK.RGB_TO_OKHSL(rgb);
+        okhsl.L = clamp(okhsl.L - amount, 0, 100);
+        return ColorLab.#rgbToHex(OK.OKLCH_TO_RGB(OK.OKHSL_TO_OKLCH(okhsl)));
+    }
+
+    static toneOkhsl(input, amount = 10) {
+        const rgb = ColorLab.#getRgbChannels(input);
+        if (!rgb) return null;
+        const okhsl = OK.RGB_TO_OKHSL(rgb);
+        okhsl.S = clamp(okhsl.S - amount, 0, 100);
+        return ColorLab.#rgbToHex(OK.OKLCH_TO_RGB(OK.OKHSL_TO_OKLCH(okhsl)));
+    }
+
+    /* 8. Utilities (Mix, Random, Harmonies) */
+    static mix(color1, color2, ratio = 0.5) {
+        const rgb1 = ColorLab.#getRgbChannels(color1);
+        const rgb2 = ColorLab.#getRgbChannels(color2);
+        if (!rgb1 || !rgb2) return null;
+        const r = Math.round(rgb1.R + (rgb2.R - rgb1.R) * ratio);
+        const g = Math.round(rgb1.G + (rgb2.G - rgb1.G) * ratio);
+        const b = Math.round(rgb1.B + (rgb2.B - rgb1.B) * ratio);
+        const a = parseFloat((rgb1.A + (rgb2.A - rgb1.A) * ratio).toFixed(2));
+        return ColorLab.#rgbToHex({ R: r, G: g, B: b, A: a });
+    }
+
+    static random() {
+        return ColorLab.#rgbToHex({
+            R: Math.floor(Math.random() * 256),
+            G: Math.floor(Math.random() * 256),
+            B: Math.floor(Math.random() * 256),
+            A: 1
+        });
+    }
+
+    static getHarmonies(input) {
+        const hsl = ColorLab.getHslChannels(input);
+        if (!hsl) return null;
+        const result = {};
+        for (const [name, deltas] of Object.entries(ColorLab.#HARMONIES)) {
+            result[name] = deltas.map(delta => {
+                const newH = ((hsl.H + delta) % 360 + 360) % 360;
+                return ColorLab.#rgbToHex(SRGB.HSL_TO_RGB({ H: newH, S: hsl.S, L: hsl.L, A: hsl.A }));
+            });
+        }
+        return result;
     }
 }
