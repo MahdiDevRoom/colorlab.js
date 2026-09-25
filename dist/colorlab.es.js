@@ -6,7 +6,7 @@
  * @see https://github.com/mahdidevroom/Colorlab.js
  */
 
-class ColorLab {
+export default class ColorLab {
     /* --------------------------------------------
         Public Values
     -------------------------------------------- */
