@@ -1505,13 +1505,6 @@ export default class ColorLab {
             value: ColorLab.getValue(input),
             ray: ColorLab.getRay(input),
             okHue: ColorLab.getOkHue(input),
-            
-            // ANSI
-            ansi256: ColorLab.to256(input),
-            ansiFg: ColorLab.ansiFg(input),
-            ansiBg: ColorLab.ansiBg(input),
-            trueFg: ColorLab.trueFg(input),
-            trueBg: ColorLab.trueBg(input),
         };
     }
     static channels(input) {
@@ -1575,51 +1568,51 @@ export default class ColorLab {
             `cmyk(${ch.C}% ${ch.M}% ${ch.Y}% ${ch.K}%)` :
             `cmyk(${ch.C}% ${ch.M}% ${ch.Y}% ${ch.K}% / ${ch.A})`;
     }
-    static toXyz(input) {
-        if (Array.isArray(input)) return input.map(item => ColorLab.toXyz(item));
-        const rgb = ColorLab.#toRgbChannels(input);
-        if (!rgb) return null;
-        const ch = ColorLab.#ENGINE.RGB_XYZ(rgb);
-        return ch.A === 1 ?
-            `color(xyz ${ch.X} ${ch.Y} ${ch.Z})` :
-            `color(xyz ${ch.X} ${ch.Y} ${ch.Z} / ${ch.A})`;
-    }
-    static toLab(input) {
-        if (Array.isArray(input)) return input.map(item => ColorLab.toLab(item));
-        const rgb = ColorLab.#toRgbChannels(input);
-        if (!rgb) return null;
-        const ch = ColorLab.#ENGINE.RGB_LAB(rgb);
-        return ch.A === 1 ?
-            `lab(${ch.L}% ${ch.a} ${ch.b})` :
-            `lab(${ch.L}% ${ch.a} ${ch.b} / ${ch.A})`;
-    }
-    static toLch(input) {
-        if (Array.isArray(input)) return input.map(item => ColorLab.toLch(item));
-        const rgb = ColorLab.#toRgbChannels(input);
-        if (!rgb) return null;
-        const ch = ColorLab.#ENGINE.RGB_LCH(rgb);
-        return ch.A === 1 ?
-            `lch(${ch.L}% ${ch.C} ${ch.H}deg)` :
-            `lch(${ch.L}% ${ch.C} ${ch.H}deg / ${ch.A})`;
-    }
-    static toOkLab(input) {
-        if (Array.isArray(input)) return input.map(item => ColorLab.toOkLab(item));
-        const rgb = ColorLab.#toRgbChannels(input);
-        if (!rgb) return null;
-        const ch = ColorLab.#ENGINE.RGB_OKLAB(rgb);
-        return ch.A === 1 ?
-            `oklab(${ch.L} ${ch.a} ${ch.b})` :
-            `oklab(${ch.L} ${ch.a} ${ch.b} / ${ch.A})`;
-    }
-    static toOkLch(input) {
-        if (Array.isArray(input)) return input.map(item => ColorLab.toOkLch(item));
-        const rgb = ColorLab.#toRgbChannels(input);
-        if (!rgb) return null;
-        const ch = ColorLab.#ENGINE.RGB_OKLCH(rgb);
-        return ch.A === 1 ?
-            `oklch(${ch.L} ${ch.C} ${ch.H}deg)` :
-            `oklch(${ch.L} ${ch.C} ${ch.H}deg / ${ch.A})`;
-    }
+static toXyz(input) {
+    if (Array.isArray(input)) return input.map(item => ColorLab.toXyz(item));
+    const rgb = ColorLab.#toRgbChannels(input);
+    if (!rgb) return null;
+    const ch = ColorLab.#ENGINE.RGB_XYZ(rgb);
+    return ch.A === 1 ?
+        `color(xyz ${ch.X.toFixed(3)} ${ch.Y.toFixed(3)} ${ch.Z.toFixed(3)})` :
+        `color(xyz ${ch.X.toFixed(3)} ${ch.Y.toFixed(3)} ${ch.Z.toFixed(3)} / ${ch.A})`;
+}
+static toLab(input) {
+    if (Array.isArray(input)) return input.map(item => ColorLab.toLab(item));
+    const rgb = ColorLab.#toRgbChannels(input);
+    if (!rgb) return null;
+    const ch = ColorLab.#ENGINE.RGB_LAB(rgb);
+    return ch.A === 1 ?
+        `lab(${ch.L.toFixed(2)}% ${ch.a.toFixed(2)} ${ch.b.toFixed(2)})` :
+        `lab(${ch.L.toFixed(2)}% ${ch.a.toFixed(2)} ${ch.b.toFixed(2)} / ${ch.A})`;
+}
+static toLch(input) {
+    if (Array.isArray(input)) return input.map(item => ColorLab.toLch(item));
+    const rgb = ColorLab.#toRgbChannels(input);
+    if (!rgb) return null;
+    const ch = ColorLab.#ENGINE.RGB_LCH(rgb);
+    return ch.A === 1 ?
+        `lch(${ch.L.toFixed(2)}% ${ch.C.toFixed(2)} ${ch.H}deg)` :
+        `lch(${ch.L.toFixed(2)}% ${ch.C.toFixed(2)} ${ch.H}deg / ${ch.A})`;
+}
+static toOkLab(input) {
+    if (Array.isArray(input)) return input.map(item => ColorLab.toOkLab(item));
+    const rgb = ColorLab.#toRgbChannels(input);
+    if (!rgb) return null;
+    const ch = ColorLab.#ENGINE.RGB_OKLAB(rgb);
+    return ch.A === 1 ?
+        `oklab(${ch.L.toFixed(3)} ${ch.a.toFixed(3)} ${ch.b.toFixed(3)})` :
+        `oklab(${ch.L.toFixed(3)} ${ch.a.toFixed(3)} ${ch.b.toFixed(3)} / ${ch.A})`;
+}
+static toOkLch(input) {
+    if (Array.isArray(input)) return input.map(item => ColorLab.toOkLch(item));
+    const rgb = ColorLab.#toRgbChannels(input);
+    if (!rgb) return null;
+    const ch = ColorLab.#ENGINE.RGB_OKLCH(rgb);
+    return ch.A === 1 ?
+        `oklch(${ch.L.toFixed(3)} ${ch.C.toFixed(3)} ${ch.H}deg)` :
+        `oklch(${ch.L.toFixed(3)} ${ch.C.toFixed(3)} ${ch.H}deg / ${ch.A})`;
+}
     static toOkHsl(input) {
         if (Array.isArray(input)) return input.map(item => ColorLab.toOkHsl(item));
         const rgb = ColorLab.#toRgbChannels(input);
