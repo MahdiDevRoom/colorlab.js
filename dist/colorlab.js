@@ -394,7 +394,7 @@ export default class ColorLab {
     };
     
     /* --------------------------------------------
-        Constants
+        Private Helper Constants
     -------------------------------------------- */
     static #D65 = [
         0.9504559270516716, 
@@ -417,12 +417,39 @@ export default class ColorLab {
         offset:   16,
         scale:    116,
     };
-    static #OK_CONSTANTS = {
-        K1: 0.206,
-        K2: 0.03,
-        K3: (1 + 0.206) / (1 + 0.03),
-        tau: 2 * Math.PI,
-        floatMax: Number.MAX_VALUE,
+    static #OK_CONSTANTS = (() => {
+        const K1 = 0.206;
+        const K2 = 0.03;
+        const K3 = (1 + K1) / (1 + K2);
+        
+        return {
+            K1,
+            K2,
+            K3,
+            tau: 2 * Math.PI,
+            floatMax: Number.MAX_VALUE,
+            stMidS: {
+                base: 0.11516993,
+                denom: [7.44778970, 4.15901240],
+                poly:  [-2.19557347, 1.75198401, -2.13704948, -10.02301043, -4.24894561, 5.38770819, 4.69891013],
+            },
+            stMidT: {
+                base: 0.11239642,
+                denom: [1.61320320, -0.68124379],
+                poly:  [0.40370612, 0.90148123, -0.27087943, 0.61223990, 0.00299215, -0.45399568, -0.14661872],
+            },
+        };
+    })();
+    static #WCAG_CONSTANTS = {
+        rWeight: 0.2126,
+        gWeight: 0.7152,
+        bWeight: 0.0722,
+        offset: 0.05,
+        levels: {
+            AAA: 7,
+            AA: 4.5,
+            A: 3,
+        },
     };
     static #RGB_TO_XYZ_MATRIX = [
         [0.41239079926595934, 0.357584339383878, 0.1804807884018343],
@@ -527,9 +554,392 @@ export default class ColorLab {
             ? Math.pow(t, 3)
             : (scale * t - offset) / kappa;
     }
+    static #copySign(to, from) {
+        return Math.sign(to) === Math.sign(from) ? to : -to;
+    }
+    static #spow(base, exp) {
+        return ColorLab.#copySign(Math.abs(base) ** exp, base);
+    }
+    static #vdot(a, b) {
+        let sum = 0;
+        for (let i = 0; i < a.length; i++) sum += a[i] * b[i];
+        return sum;
+    }
+    static #multiplyV3M3x3(input, matrix) {
+        return [
+            ColorLab.#vdot(input, matrix[0]),
+            ColorLab.#vdot(input, matrix[1]),
+            ColorLab.#vdot(input, matrix[2]),
+        ];
+    }
+    static #constrain(angle) {
+        return typeof angle !== 'number' ? angle : ((angle % 360) + 360) % 360;
+    }
+    static #toe(x) {
+        const { K1, K2, K3 } = ColorLab.#OK_CONSTANTS;
+        return 0.5 * (K3 * x - K1 + Math.sqrt((K3 * x - K1) ** 2 + 4 * K2 * K3 * x));
+    }
+    static #toeInv(x) {
+        const { K1, K2, K3 } = ColorLab.#OK_CONSTANTS;
+        return (x ** 2 + K1 * x) / (K3 * (x + K2));
+    }
+    static #toSt(cusp) {
+        const [L, C] = cusp;
+        return [C / L, C / (1 - L)];
+    }
+    static #getStMid(a, b) {
+        const { stMidS, stMidT } = ColorLab.#OK_CONSTANTS;
     
+        const s = stMidS.base + 1 / (
+            stMidS.denom[0] + stMidS.denom[1] * b +
+            a * (
+                stMidS.poly[0] + stMidS.poly[1] * b +
+                a * (
+                    stMidS.poly[2] + stMidS.poly[3] * b +
+                    a * (
+                        stMidS.poly[4] + stMidS.poly[5] * b + stMidS.poly[6] * a
+                    )
+                )
+            )
+        );
+    
+        const t = stMidT.base + 1 / (
+            stMidT.denom[0] + stMidT.denom[1] * b +
+            a * (
+                stMidT.poly[0] + stMidT.poly[1] * b +
+                a * (
+                    stMidT.poly[2] + stMidT.poly[3] * b +
+                    a * (
+                        stMidT.poly[4] + stMidT.poly[5] * b + stMidT.poly[6] * a
+                    )
+                )
+            )
+        );
+    
+        return [s, t];
+    }
+    static #computeMaxSaturation(a, b) {
+        const lmsToRgb = ColorLab.#LMS_TO_RGB_MATRIX;
+        const okCoeff = ColorLab.#OK_COEFFICIENTS;
+    
+        let k0, k1, k2, k3, k4, wl, wm, ws;
+    
+        if (ColorLab.#vdot(okCoeff[0][0], [a, b]) > 1) {
+            // Red
+            [k0, k1, k2, k3, k4] = okCoeff[0][1];
+            [wl, wm, ws] = lmsToRgb[0];
+        } else if (ColorLab.#vdot(okCoeff[1][0], [a, b]) > 1) {
+            // Green
+            [k0, k1, k2, k3, k4] = okCoeff[1][1];
+            [wl, wm, ws] = lmsToRgb[1];
+        } else {
+            // Blue
+            [k0, k1, k2, k3, k4] = okCoeff[2][1];
+            [wl, wm, ws] = lmsToRgb[2];
+        }
+    
+        let sat = k0 + k1 * a + k2 * b + k3 * a ** 2 + k4 * a * b;
+    
+        // Halley's method
+        const kl = ColorLab.#vdot(ColorLab.#OKLAB_TO_LMS_MATRIX[0].slice(1), [a, b]);
+        const km = ColorLab.#vdot(ColorLab.#OKLAB_TO_LMS_MATRIX[1].slice(1), [a, b]);
+        const ks = ColorLab.#vdot(ColorLab.#OKLAB_TO_LMS_MATRIX[2].slice(1), [a, b]);
+    
+        const l_ = 1.0 + sat * kl;
+        const m_ = 1.0 + sat * km;
+        const s_ = 1.0 + sat * ks;
+    
+        const l = l_ ** 3;
+        const m = m_ ** 3;
+        const s = s_ ** 3;
+    
+        const lds = 3.0 * kl * l_ ** 2;
+        const mds = 3.0 * km * m_ ** 2;
+        const sds = 3.0 * ks * s_ ** 2;
+    
+        const lds2 = 6.0 * kl ** 2 * l_;
+        const mds2 = 6.0 * km ** 2 * m_;
+        const sds2 = 6.0 * ks ** 2 * s_;
+    
+        const f = wl * l + wm * m + ws * s;
+        const f1 = wl * lds + wm * mds + ws * sds;
+        const f2 = wl * lds2 + wm * mds2 + ws * sds2;
+    
+        sat = sat - (f * f1) / (f1 ** 2 - 0.5 * f * f2);
+    
+        return sat;
+    }
+    static #oklabToLinearRGB(lab) {
+        const lmsToRgb = ColorLab.#LMS_TO_RGB_MATRIX;
+    
+        let lms = ColorLab.#multiplyV3M3x3(lab, ColorLab.#OKLAB_TO_LMS_MATRIX);
+    
+        lms[0] = lms[0] ** 3;
+        lms[1] = lms[1] ** 3;
+        lms[2] = lms[2] ** 3;
+    
+        return ColorLab.#multiplyV3M3x3(lms, lmsToRgb);
+    }
+    static #findCusp(a, b) {
+        const lmsToRgb = ColorLab.#LMS_TO_RGB_MATRIX;
+        const okCoeff = ColorLab.#OK_COEFFICIENTS;
+        const sCusp = ColorLab.#computeMaxSaturation(a, b);
+        const rgb = ColorLab.#oklabToLinearRGB([1, sCusp * a, sCusp * b]);
+        const lCusp = ColorLab.#spow(1.0 / Math.max(...rgb), 1 / 3);
+        const cCusp = lCusp * sCusp;
+    
+        return [lCusp, cCusp];
+    }
+    static #findGamutIntersection(a, b, l1, c1, l0, cusp) {
+        const lmsToRgb = ColorLab.#LMS_TO_RGB_MATRIX;
+        const { floatMax } = ColorLab.#OK_CONSTANTS;
+    
+        let t;
+    
+        if (cusp === undefined) {
+            cusp = ColorLab.#findCusp(a, b);
+        }
+    
+        if ((l1 - l0) * cusp[1] - (cusp[0] - l0) * c1 <= 0) {
+            t = (cusp[1] * l0) / (c1 * cusp[0] + cusp[1] * (l0 - l1));
+        } else {
+            t = (cusp[1] * (l0 - 1)) / (c1 * (cusp[0] - 1) + cusp[1] * (l0 - l1));
+    
+            const dl = l1 - l0;
+            const dc = c1;
+            const kl = ColorLab.#vdot(ColorLab.#OKLAB_TO_LMS_MATRIX[0].slice(1), [a, b]);
+            const km = ColorLab.#vdot(ColorLab.#OKLAB_TO_LMS_MATRIX[1].slice(1), [a, b]);
+            const ks = ColorLab.#vdot(ColorLab.#OKLAB_TO_LMS_MATRIX[2].slice(1), [a, b]);
+            const ldt_ = dl + dc * kl;
+            const mdt_ = dl + dc * km;
+            const sdt_ = dl + dc * ks;
+            const L = l0 * (1 - t) + t * l1;
+            const C = t * c1;
+            const l_ = L + C * kl;
+            const m_ = L + C * km;
+            const s_ = L + C * ks;
+            const l = l_ ** 3;
+            const m = m_ ** 3;
+            const s = s_ ** 3;
+            const ldt = 3 * ldt_ * l_ ** 2;
+            const mdt = 3 * mdt_ * m_ ** 2;
+            const sdt = 3 * sdt_ * s_ ** 2;
+            const ldt2 = 6 * ldt_ ** 2 * l_;
+            const mdt2 = 6 * mdt_ ** 2 * m_;
+            const sdt2 = 6 * sdt_ ** 2 * s_;
+            const r_ = ColorLab.#vdot(lmsToRgb[0], [l, m, s]) - 1;
+            const r1 = ColorLab.#vdot(lmsToRgb[0], [ldt, mdt, sdt]);
+            const r2 = ColorLab.#vdot(lmsToRgb[0], [ldt2, mdt2, sdt2]);
+            const ur = r1 / (r1 * r1 - 0.5 * r_ * r2);
+            let tr = -r_ * ur;
+            const g_ = ColorLab.#vdot(lmsToRgb[1], [l, m, s]) - 1;
+            const g1 = ColorLab.#vdot(lmsToRgb[1], [ldt, mdt, sdt]);
+            const g2 = ColorLab.#vdot(lmsToRgb[1], [ldt2, mdt2, sdt2]);
+            const ug = g1 / (g1 * g1 - 0.5 * g_ * g2);
+            let tg = -g_ * ug;
+            const b_ = ColorLab.#vdot(lmsToRgb[2], [l, m, s]) - 1;
+            const b1 = ColorLab.#vdot(lmsToRgb[2], [ldt, mdt, sdt]);
+            const b2 = ColorLab.#vdot(lmsToRgb[2], [ldt2, mdt2, sdt2]);
+            const ub = b1 / (b1 * b1 - 0.5 * b_ * b2);
+            let tb = -b_ * ub;
+    
+            tr = ur >= 0 ? tr : floatMax;
+            tg = ug >= 0 ? tg : floatMax;
+            tb = ub >= 0 ? tb : floatMax;
+    
+            t += Math.min(tr, Math.min(tg, tb));
+        }
+    
+        return t;
+    }
+    static #getCs(lab) {
+        const lmsToRgb = ColorLab.#LMS_TO_RGB_MATRIX;
+        const [l, a, b] = lab;
+        const cusp = ColorLab.#findCusp(a, b);
+        const cMax = ColorLab.#findGamutIntersection(a, b, l, 1, l, cusp);
+        const stMax = ColorLab.#toSt(cusp);
+        const k = cMax / Math.min(l * stMax[0], (1 - l) * stMax[1]);
+        const stMid = ColorLab.#getStMid(a, b);
+        let ca = l * stMid[0];
+        let cb = (1 - l) * stMid[1];
+        const cMid = 0.9 * k * Math.sqrt(Math.sqrt(1 / (1 / ca ** 4 + 1 / cb ** 4)));
+    
+        ca = l * 0.4;
+        cb = (1 - l) * 0.8;
+    
+        const c0 = Math.sqrt(1 / (1 / ca ** 2 + 1 / cb ** 2));
+    
+        return [c0, cMid, cMax];
+    }
+    static #okhslToOklab(hsl) {
+        const { tau } = ColorLab.#OK_CONSTANTS;
+        const [h, s, l] = hsl;
+        let L = ColorLab.#toeInv(l);
+        let a = 0;
+        let b = 0;
+        const hNorm = ColorLab.#constrain(h) / 360;
+    
+        if (L !== 0 && L !== 1 && s !== 0) {
+            const a_ = Math.cos(tau * hNorm);
+            const b_ = Math.sin(tau * hNorm);
+            const [c0, cMid, cMax] = ColorLab.#getCs([L, a_, b_]);
+            const mid = 0.8;
+            const midInv = 1.25;
+            let t, k0, k1, k2;
+    
+            if (s < mid) {
+                t = midInv * s;
+                k0 = 0;
+                k1 = mid * c0;
+                k2 = 1 - k1 / cMid;
+            } else {
+                t = 5 * (s - 0.8);
+                k0 = cMid;
+                k1 = (0.2 * cMid ** 2 * 1.25 ** 2) / c0;
+                k2 = 1 - k1 / (cMax - cMid);
+            }
+    
+            const c = k0 + (t * k1) / (1 - k2 * t);
+    
+            a = c * a_;
+            b = c * b_;
+        }
+    
+        return [L, a, b];
+    }
+    static #oklabToOkhsl(lab) {
+        const { tau } = ColorLab.#OK_CONSTANTS;
+        const [L, a, b] = lab;
+        const εL = 1e-7;
+        const εS = 1e-4;
+        let s = 0;
+        let h = 0;
+        const l = ColorLab.#toe(L);
+        const c = Math.sqrt(a ** 2 + b ** 2);
+        const hRad = 0.5 + Math.atan2(-b, -a) / tau;
+    
+        if (l !== 0 && l !== 1 && c !== 0) {
+            const a_ = a / c;
+            const b_ = b / c;
+            const [c0, cMid, cMax] = ColorLab.#getCs([L, a_, b_]);
+            const mid = 0.8;
+            const midInv = 1.25;
+            let k0, k1, k2, t;
+    
+            if (c < cMid) {
+                k1 = mid * c0;
+                k2 = 1 - k1 / cMid;
+                t = c / (k1 + k2 * c);
+                s = t * mid;
+            } else {
+                k0 = cMid;
+                k1 = (0.2 * cMid ** 2 * midInv ** 2) / c0;
+                k2 = 1 - k1 / (cMax - cMid);
+                t = (c - k0) / (k1 + k2 * (c - k0));
+                s = mid + 0.2 * t;
+            }
+        }
+    
+        const achromatic = Math.abs(s) < εS;
+        if (achromatic || l === 0 || Math.abs(1 - l) < εL) {
+            h = null;
+            if (!achromatic) {
+                s = 0;
+            }
+        } else {
+            h = ColorLab.#constrain(hRad * 360);
+        }
+    
+        return [h, s, l];
+    }
+    static #okhsvToOklab(hsv) {
+        const { tau } = ColorLab.#OK_CONSTANTS;
+        const [h, s, v] = hsv;
+    
+        const hNorm = ColorLab.#constrain(h) / 360;
+    
+        let l = ColorLab.#toeInv(v);
+        let a = 0;
+        let b = 0;
+    
+        if (l !== 0 && s !== 0) {
+            const a_ = Math.cos(tau * hNorm);
+            const b_ = Math.sin(tau * hNorm);
+            const cusp = ColorLab.#findCusp(a_, b_);
+            const [sMax, tMax] = ColorLab.#toSt(cusp);
+            const s0 = 0.5;
+            const k = 1 - s0 / sMax;
+            const lv = 1 - (s * s0) / (s0 + tMax - tMax * k * s);
+            const cv = (s * tMax * s0) / (s0 + tMax - tMax * k * s);
+    
+            l = v * lv;
+            let c = v * cv;
+    
+            const lvt = ColorLab.#toeInv(lv);
+            const cvt = (cv * lvt) / lv;
+            const lNew = ColorLab.#toeInv(l);
+            
+            c = (c * lNew) / l;
+            l = lNew;
+            
+            const [rs, gs, bs] = ColorLab.#oklabToLinearRGB([lvt, a_ * cvt, b_ * cvt]);
+            const scaleL = ColorLab.#spow(1 / Math.max(Math.max(rs, gs), Math.max(bs, 0)), 1 / 3);
+    
+            l = l * scaleL;
+            c = c * scaleL;
+    
+            a = c * a_;
+            b = c * b_;
+        }
+    
+        return [l, a, b];
+    }
+    static #oklabToOkhsv(lab) {
+        const { tau } = ColorLab.#OK_CONSTANTS;
+        const [L, a, b] = lab;
+        const ε = 1e-4;
+        let s = 0;
+        let h = 0;
+        let v = ColorLab.#toe(L);
+        const c = Math.sqrt(a ** 2 + b ** 2);
+        const hRad = 0.5 + Math.atan2(-b, -a) / tau;
+    
+        if (L !== 0 && L !== 1 && c !== 0) {
+            const a_ = a / c;
+            const b_ = b / c;
+            const cusp = ColorLab.#findCusp(a_, b_);
+            const [sMax, tMax] = ColorLab.#toSt(cusp);
+            const s0 = 0.5;
+            const k = 1 - s0 / sMax;
+            const t = tMax / (c + L * tMax);
+            const lv = t * L;
+            const cv = t * c;
+            const lvt = ColorLab.#toeInv(lv);
+            const cvt = (cv * lvt) / lv;
+            const [rs, gs, bs] = ColorLab.#oklabToLinearRGB([lvt, a_ * cvt, b_ * cvt]);
+            const scaleL = ColorLab.#spow(1 / Math.max(Math.max(rs, gs), Math.max(bs, 0)), 1 / 3);
+    
+            let l = L / scaleL;
+            let c2 = c / scaleL;
+    
+            c2 = (c2 * ColorLab.#toe(l)) / l;
+            l = ColorLab.#toe(l);
+    
+            v = l / lv;
+            s = ((s0 + tMax) * cv) / (tMax * s0 + tMax * k * cv);
+        }
+    
+        if (Math.abs(s) < ε || v === 0) {
+            h = null;
+        } else {
+            h = ColorLab.#constrain(hRad * 360);
+        }
+    
+        return [h, s, v];
+    }
+
     /* --------------------------------------------
-        Convert Engine
+        Private Convert Engine
     -------------------------------------------- */
     static #ENGINE = {
         // sRGB Family
@@ -775,101 +1185,791 @@ export default class ColorLab {
         },
         
         // OK Family
-        RGB_OKLAB: () => {},
-        OKLAB_RGB: () => {},
-        OKLAB_OKLCH: () => {},
-        OKLCH_OKLAB: () => {},
-        OKLCH_OKHSL: () => {},
-        OKHSL_OKLCH: () => {},
-        OKLCH_OKHSV: () => {},
-        OKHSV_OKLCH: () => {},
-        RGB_OKLCH: () => {},
-        OKLCH_RGB: () => {},
-        RGB_OKHSL: () => {},
-        OKHSL_RGB: () => {},
-        RGB_OKHSV: () => {},
-        OKHSV_RGB: () => {},
+        RGB_OKLAB: ({ R, G, B, A = 1 }) => {
+            const rgb = [R, G, B];
+            const xyz = ColorLab.#ENGINE.RGB_XYZ({ R, G, B, A: 1 });
+            const xyzArr = [xyz.X, xyz.Y, xyz.Z];
+        
+            let lms = ColorLab.#multiplyV3M3x3(xyzArr, ColorLab.#XYZ_TO_LMS_MATRIX);
+        
+            lms[0] = Math.cbrt(lms[0]);
+            lms[1] = Math.cbrt(lms[1]);
+            lms[2] = Math.cbrt(lms[2]);
+        
+            const [L, a, b] = ColorLab.#multiplyV3M3x3(lms, ColorLab.#LMS_TO_OKLAB_MATRIX);
+        
+            return { L, a, b, A: parseFloat(A.toFixed(2)) };
+        },
+        OKLAB_RGB: ({ L, a, b, A = 1 }) => {
+            let lms = ColorLab.#multiplyV3M3x3([L, a, b], ColorLab.#OKLAB_TO_LMS_MATRIX);
+        
+            lms[0] = lms[0] ** 3;
+            lms[1] = lms[1] ** 3;
+            lms[2] = lms[2] ** 3;
+        
+            const [X, Y, Z] = ColorLab.#multiplyV3M3x3(lms, ColorLab.#LMS_TO_XYZ_MATRIX);
+        
+            return ColorLab.#ENGINE.XYZ_RGB({ X, Y, Z, A });
+        },
+        OKLAB_OKLCH: ({ L, a, b, A = 1 }) => {
+            const C = Math.sqrt(a * a + b * b);
+            let H = Math.atan2(b, a) * (180 / Math.PI);
+            if (H < 0) H += 360;
+        
+            return { L, C, H: Math.round(H), A: parseFloat(A.toFixed(2)) };
+        },
+        OKLCH_OKLAB: ({ L, C, H, A = 1 }) => {
+            const hRad = H * (Math.PI / 180);
+        
+            return {
+                L,
+                a: C * Math.cos(hRad),
+                b: C * Math.sin(hRad),
+                A: parseFloat(A.toFixed(2))
+            };
+        },
+        OKLCH_OKHSL: ({ L, C, H, A = 1 }) => {
+            const [h, s, l] = ColorLab.#oklabToOkhsl([L, C * Math.cos(H * Math.PI / 180), C * Math.sin(H * Math.PI / 180)]);
+            return {
+                H: Math.round(h ?? 0),
+                S: Math.round(s * 100),
+                L: Math.round(l * 100),
+                A: parseFloat(A.toFixed(2))
+            };
+        },
+        OKHSL_OKLCH: ({ H, S, L, A = 1 }) => {
+            const [L_, a, b] = ColorLab.#okhslToOklab([H, S / 100, L / 100]);
+            const C = Math.sqrt(a * a + b * b);
+            let h = Math.atan2(b, a) * (180 / Math.PI);
+            if (h < 0) h += 360;
+        
+            return {
+                L: L_,
+                C,
+                H: Math.round(h),
+                A: parseFloat(A.toFixed(2))
+            };
+        },
+        OKLCH_OKHSV: ({ L, C, H, A = 1 }) => {
+            const [h, s, v] = ColorLab.#oklabToOkhsv([L, C * Math.cos(H * Math.PI / 180), C * Math.sin(H * Math.PI / 180)]);
+            return {
+                H: Math.round(h ?? 0),
+                S: Math.round(s * 100),
+                V: Math.round(v * 100),
+                A: parseFloat(A.toFixed(2))
+            };
+        },
+        OKHSV_OKLCH: ({ H, S, V, A = 1 }) => {
+            const [L, a, b] = ColorLab.#okhsvToOklab([H, S / 100, V / 100]);
+            const C = Math.sqrt(a * a + b * b);
+            let h = Math.atan2(b, a) * (180 / Math.PI);
+            if (h < 0) h += 360;
+        
+            return {
+                L,
+                C,
+                H: Math.round(h),
+                A: parseFloat(A.toFixed(2))
+            };
+        },
+        RGB_OKLCH: (rgb) => {
+            return ColorLab.#ENGINE.OKLAB_OKLCH(ColorLab.#ENGINE.RGB_OKLAB(rgb));
+        },
+        OKLCH_RGB: (oklch) => {
+            return ColorLab.#ENGINE.OKLAB_RGB(ColorLab.#ENGINE.OKLCH_OKLAB(oklch));
+        },
+        RGB_OKHSL: (rgb) => {
+            return ColorLab.#ENGINE.OKLCH_OKHSL(ColorLab.#ENGINE.RGB_OKLCH(rgb));
+        },
+        OKHSL_RGB: (okhsl) => {
+            return ColorLab.#ENGINE.OKLCH_RGB(ColorLab.#ENGINE.OKHSL_OKLCH(okhsl));
+        },
+        RGB_OKHSV: (rgb) => {
+            return ColorLab.#ENGINE.OKLCH_OKHSV(ColorLab.#ENGINE.RGB_OKLCH(rgb));
+        },
+        OKHSV_RGB: (okhsv) => {
+            return ColorLab.#ENGINE.OKLCH_RGB(ColorLab.#ENGINE.OKHSV_OKLCH(okhsv));
+        },
         
         // Keyword Family
-        RGB_KEYWORD: () => {},
-        KEYWORD_RGB: () => {},
+        RGB_KEYWORD: ({ R, G, B }) => {
+            let closest = null;
+            let min = Infinity;
+        
+            for (const [name, hex] of Object.entries(ColorLab.#COLORS)) {
+                const { R: r, G: g, B: b } = ColorLab.#EXTRACT.HEX(hex);
+                const dist = (R - r) ** 2 + (G - g) ** 2 + (B - b) ** 2;
+        
+                if (dist < min) {
+                    min = dist;
+                    closest = name;
+                }
+            }
+        
+            return closest;
+        },
+        KEYWORD_RGB: (keyword) => {
+            const hex = ColorLab.#COLORS_MAP.get(ColorLab.#trimCase(keyword));
+            if (!hex) return null;
+            return ColorLab.#EXTRACT.HEX(hex);
+        },
     };
+    
+    /* --------------------------------------------
+        Private Helper Methods
+    -------------------------------------------- */
+    static #detectSmart(input) {
+        // Object Input Detection
+        if (typeof input === 'object' && input !== null && !Array.isArray(input)) {
+            if ('R' in input && 'G' in input && 'B' in input) return 'RGB';
+            if ('H' in input && 'S' in input && 'L' in input) return (input.space === 'okhsl' || input.mode === 'okhsl') ? 'OKHSL' : 'HSL';
+            if ('H' in input && 'S' in input && 'V' in input) return (input.space === 'okhsv' || input.mode === 'okhsv') ? 'OKHSV' : 'HSV';
+            if ('C' in input && 'M' in input && 'Y' in input && 'K' in input) return 'CMYK';
+            if ('X' in input && 'Y' in input && 'Z' in input) return 'XYZ';
+            if ('L' in input && 'C' in input && 'H' in input) return input.L > 1 ? 'LCH' : 'OKLCH';
+            if ('L' in input && 'a' in input && 'b' in input) return input.L > 1 ? 'LAB' : 'OKLAB';
+            
+            if (typeof input.toHexString === 'function') input = input.toHexString();
+            else if (typeof input.toRgbString === 'function') input = input.toRgbString();
+            else if (typeof input.toString === 'function' && input.toString() !== '[object Object]') input = String(input);
+            else return null;
+        }
+        
+        if (typeof input !== 'string') return null;
+        
+        const keyword = ColorLab.#trimCase(input);
+        if (ColorLab.#COLORS_MAP.has(keyword)) return 'KEYWORD';
+        
+        const css = input.trim();
+        
+        if (ColorLab.#REGEXP.HEX.test(css)) return 'HEX';
+        if (ColorLab.#REGEXP.RGB.test(css)) return 'RGB';
+        if (ColorLab.#REGEXP.HSL.test(css)) return 'HSL';
+        if (ColorLab.#REGEXP.HSV.test(css)) return 'HSV';
+        if (ColorLab.#REGEXP.CMYK.test(css)) return 'CMYK';
+        if (ColorLab.#REGEXP.OKHSL.test(css)) return 'OKHSL';
+        if (ColorLab.#REGEXP.OKHSV.test(css)) return 'OKHSV';
+        if (ColorLab.#REGEXP.OKLCH.test(css)) return 'OKLCH';
+        if (ColorLab.#REGEXP.OKLAB.test(css)) return 'OKLAB';
+        if (ColorLab.#REGEXP.LCH.test(css)) return 'LCH';
+        if (ColorLab.#REGEXP.LAB.test(css)) return 'LAB';
+        if (ColorLab.#REGEXP.XYZ.test(css)) return 'XYZ';
+        
+        return null;
+    }
+    static #normalizeSmart(input) {
+        const type = ColorLab.#detectSmart(input);
+        if (!type) return null;
+    
+        // Object Input
+        if (typeof input === 'object' && input !== null && !Array.isArray(input)) {
+            if (type === 'RGB')   return `rgb(${input.R} ${input.G} ${input.B} / ${input.A ?? 1})`;
+            if (type === 'HSL')   return `hsl(${input.H}deg ${input.S}% ${input.L}% / ${input.A ?? 1})`;
+            if (type === 'HSV')   return `hsv(${input.H}deg ${input.S}% ${input.V}% / ${input.A ?? 1})`;
+            if (type === 'CMYK')  return `cmyk(${input.C}% ${input.M}% ${input.Y}% ${input.K}% / ${input.A ?? 1})`;
+            if (type === 'XYZ')   return `color(xyz ${input.X} ${input.Y} ${input.Z} / ${input.A ?? 1})`;
+            if (type === 'LAB')   return `lab(${input.L}% ${input.a} ${input.b} / ${input.A ?? 1})`;
+            if (type === 'LCH')   return `lch(${input.L}% ${input.C} ${input.H}deg / ${input.A ?? 1})`;
+            if (type === 'OKLAB') return `oklab(${input.L} ${input.a} ${input.b} / ${input.A ?? 1})`;
+            if (type === 'OKLCH') return `oklch(${input.L} ${input.C} ${input.H}deg / ${input.A ?? 1})`;
+            if (type === 'OKHSL') return `okhsl(${input.H}deg ${input.S}% ${input.L}% / ${input.A ?? 1})`;
+            if (type === 'OKHSV') return `okhsv(${input.H}deg ${input.S}% ${input.V}% / ${input.A ?? 1})`;
+    
+            return null;
+        }
+    
+        // String Input
+        if (type === 'KEYWORD') return ColorLab.#COLORS_MAP.get(ColorLab.#trimCase(input));
+        return ColorLab.#NORMALIZE[type](input);
+    }
+    static #getChannels(input) {
+        const type = ColorLab.#detectSmart(input);
+        if (!type) return null;
+    
+        if (typeof input === 'object' && input !== null && !Array.isArray(input)) {
+            let channels = null;
+            if (type === 'RGB')   channels = { R: Number(input.R), G: Number(input.G), B: Number(input.B), A: Number(input.A ?? 1) };
+            if (type === 'HSL')   channels = { H: Number(input.H), S: Number(input.S), L: Number(input.L), A: Number(input.A ?? 1) };
+            if (type === 'HSV')   channels = { H: Number(input.H), S: Number(input.S), V: Number(input.V), A: Number(input.A ?? 1) };
+            if (type === 'CMYK')  channels = { C: Number(input.C), M: Number(input.M), Y: Number(input.Y), K: Number(input.K), A: Number(input.A ?? 1) };
+            if (type === 'XYZ')   channels = { X: Number(input.X), Y: Number(input.Y), Z: Number(input.Z), A: Number(input.A ?? 1) };
+            if (type === 'LAB')   channels = { L: Number(input.L), a: Number(input.a), b: Number(input.b), A: Number(input.A ?? 1) };
+            if (type === 'LCH')   channels = { L: Number(input.L), C: Number(input.C), H: Number(input.H), A: Number(input.A ?? 1) };
+            if (type === 'OKLAB') channels = { L: Number(input.L), a: Number(input.a), b: Number(input.b), A: Number(input.A ?? 1) };
+            if (type === 'OKLCH') channels = { L: Number(input.L), C: Number(input.C), H: Number(input.H), A: Number(input.A ?? 1) };
+            if (type === 'OKHSL') channels = { H: Number(input.H), S: Number(input.S), L: Number(input.L), A: Number(input.A ?? 1) };
+            if (type === 'OKHSV') channels = { H: Number(input.H), S: Number(input.S), V: Number(input.V), A: Number(input.A ?? 1) };
+            return channels;
+        }
+    
+        if (type === 'KEYWORD') {
+            const hex = ColorLab.#COLORS_MAP.get(ColorLab.#trimCase(input));
+            return ColorLab.#EXTRACT.HEX(hex);
+        }
+    
+        const normalized = ColorLab.#NORMALIZE[type](input);
+        if (!normalized) return null;
+    
+        return ColorLab.#EXTRACT[type](normalized);
+    }
+    static #rgbToHex(rgb) {
+        if (!rgb) return null;
+        const r = ColorLab.#toHex2(rgb.R);
+        const g = ColorLab.#toHex2(rgb.G);
+        const b = ColorLab.#toHex2(rgb.B);
+        const a = rgb.A ?? 1;
+        return a === 1
+            ? `#${r}${g}${b}`
+            : `#${r}${g}${b}${ColorLab.#toHex2(a * 255)}`;
+    }
+    static #toRgbChannels(input) {
+        const type = ColorLab.#detectSmart(input);
+        if (!type) return null;
+    
+        if (typeof input === 'object' && input !== null && !Array.isArray(input)) {
+            const extracted = ColorLab.#getChannels(input);
+            if (!extracted) return null;
+            if (type === 'RGB') return extracted;
+            return ColorLab.#ENGINE[`${type}_RGB`](extracted);
+        }
+    
+        if (type === 'KEYWORD') {
+            const hex = ColorLab.#COLORS_MAP.get(ColorLab.#trimCase(input));
+            return ColorLab.#EXTRACT.HEX(hex);
+        }
+    
+        if (type === 'HEX') {
+            const normalized = ColorLab.#NORMALIZE.HEX(input);
+            return normalized ? ColorLab.#EXTRACT.HEX(normalized) : null;
+        }
+    
+        const normalized = ColorLab.#NORMALIZE[type](input);
+        if (!normalized) return null;
+    
+        const extracted = ColorLab.#EXTRACT[type](normalized);
+        if (!extracted) return null;
+    
+        return ColorLab.#ENGINE[`${type}_RGB`](extracted);
+    }
     
     /* --------------------------------------------
         Public Methods
     -------------------------------------------- */
     // Tools
-    static detect() {};
-    static normalize() {};
-    static isValid() {};
-    static analyze() {};
-    static channels() {};
-    static random() {};
+    static detect(input) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.#detectSmart(item));
+        return ColorLab.#detectSmart(input);
+    }
+    static normalize(input) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.#normalizeSmart(item));
+        return ColorLab.#normalizeSmart(input);
+    }
+    static isValid(input) {
+        if (Array.isArray(input)) return input.every(item => ColorLab.#detectSmart(item) !== null);
+        return ColorLab.#detectSmart(input) !== null;
+    }
+    static analyze(input) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.analyze(item));
+        if (!ColorLab.isValid(input)) return null;
+        
+        return {
+            // Base
+            keyword: ColorLab.toKeyword(input),
+            hex: ColorLab.toHex(input),
+            
+            // Formats
+            rgb: ColorLab.toRgb(input),
+            hsl: ColorLab.toHsl(input),
+            hsv: ColorLab.toHsv(input),
+            cmyk: ColorLab.toCmyk(input),
+            xyz: ColorLab.toXyz(input),
+            lab: ColorLab.toLab(input),
+            lch: ColorLab.toLch(input),
+            okLab: ColorLab.toOkLab(input),
+            okLch: ColorLab.toOkLch(input),
+            okHsl: ColorLab.toOkHsl(input),
+            okHsv: ColorLab.toOkHsv(input),
+            
+            // Detail
+            red: ColorLab.getRed(input),
+            green: ColorLab.getGreen(input),
+            blue: ColorLab.getBlue(input),
+            alpha: ColorLab.getAlpha(input),
+            hue: ColorLab.getHue(input),
+            saturation: ColorLab.getSaturation(input),
+            lightness: ColorLab.getLightness(input),
+            cyan: ColorLab.getCyan(input),
+            magenta: ColorLab.getMagenta(input),
+            yellow: ColorLab.getYellow(input),
+            key: ColorLab.getKey(input),
+            value: ColorLab.getValue(input),
+            ray: ColorLab.getRay(input),
+            okHue: ColorLab.getOkHue(input),
+            
+            // ANSI
+            ansi256: ColorLab.to256(input),
+            ansiFg: ColorLab.ansiFg(input),
+            ansiBg: ColorLab.ansiBg(input),
+            trueFg: ColorLab.trueFg(input),
+            trueBg: ColorLab.trueBg(input),
+        };
+    }
+    static channels(input) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.#getChannels(item));
+        return ColorLab.#getChannels(input);
+    }
+    static random() {
+        return ColorLab.#rgbToHex({
+            R: Math.floor(Math.random() * 256),
+            G: Math.floor(Math.random() * 256),
+            B: Math.floor(Math.random() * 256),
+            A: 1,
+        });
+    }
     
     // Color Conversions
-    static toKeyword() {};
-    static toRgb() {};
-    static toHex() {};
-    static toHsl() {};
-    static toHsv() {};
-    static toCmyk() {};
-    static toXyz() {};
-    static toLab() {};
-    static toLch() {};
-    static toOkLab() {};
-    static toOkLch() {};
-    static toOkHsl() {};
-    static toOkHsv() {};
-    
+    static toKeyword(input) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.toKeyword(item));
+        const rgb = ColorLab.#toRgbChannels(input);
+        if (!rgb) return null;
+        return ColorLab.#ENGINE.RGB_KEYWORD(rgb);
+    }
+    static toRgb(input) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.toRgb(item));
+        const ch = ColorLab.#toRgbChannels(input);
+        if (!ch) return null;
+        return ch.A === 1 ?
+            `rgb(${ch.R} ${ch.G} ${ch.B})` :
+            `rgb(${ch.R} ${ch.G} ${ch.B} / ${ch.A})`;
+    }
+    static toHex(input) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.toHex(item));
+        const rgb = ColorLab.#toRgbChannels(input);
+        if (!rgb) return null;
+        return ColorLab.#rgbToHex(rgb);
+    }
+    static toHsl(input) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.toHsl(item));
+        const rgb = ColorLab.#toRgbChannels(input);
+        if (!rgb) return null;
+        const ch = ColorLab.#ENGINE.RGB_HSL(rgb);
+        return ch.A === 1 ?
+            `hsl(${ch.H}deg ${ch.S}% ${ch.L}%)` :
+            `hsl(${ch.H}deg ${ch.S}% ${ch.L}% / ${ch.A})`;
+    }
+    static toHsv(input) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.toHsv(item));
+        const rgb = ColorLab.#toRgbChannels(input);
+        if (!rgb) return null;
+        const ch = ColorLab.#ENGINE.RGB_HSV(rgb);
+        return ch.A === 1 ?
+            `hsv(${ch.H}deg ${ch.S}% ${ch.V}%)` :
+            `hsv(${ch.H}deg ${ch.S}% ${ch.V}% / ${ch.A})`;
+    }
+    static toCmyk(input) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.toCmyk(item));
+        const rgb = ColorLab.#toRgbChannels(input);
+        if (!rgb) return null;
+        const ch = ColorLab.#ENGINE.RGB_CMYK(rgb);
+        return ch.A === 1 ?
+            `cmyk(${ch.C}% ${ch.M}% ${ch.Y}% ${ch.K}%)` :
+            `cmyk(${ch.C}% ${ch.M}% ${ch.Y}% ${ch.K}% / ${ch.A})`;
+    }
+    static toXyz(input) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.toXyz(item));
+        const rgb = ColorLab.#toRgbChannels(input);
+        if (!rgb) return null;
+        const ch = ColorLab.#ENGINE.RGB_XYZ(rgb);
+        return ch.A === 1 ?
+            `color(xyz ${ch.X} ${ch.Y} ${ch.Z})` :
+            `color(xyz ${ch.X} ${ch.Y} ${ch.Z} / ${ch.A})`;
+    }
+    static toLab(input) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.toLab(item));
+        const rgb = ColorLab.#toRgbChannels(input);
+        if (!rgb) return null;
+        const ch = ColorLab.#ENGINE.RGB_LAB(rgb);
+        return ch.A === 1 ?
+            `lab(${ch.L}% ${ch.a} ${ch.b})` :
+            `lab(${ch.L}% ${ch.a} ${ch.b} / ${ch.A})`;
+    }
+    static toLch(input) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.toLch(item));
+        const rgb = ColorLab.#toRgbChannels(input);
+        if (!rgb) return null;
+        const ch = ColorLab.#ENGINE.RGB_LCH(rgb);
+        return ch.A === 1 ?
+            `lch(${ch.L}% ${ch.C} ${ch.H}deg)` :
+            `lch(${ch.L}% ${ch.C} ${ch.H}deg / ${ch.A})`;
+    }
+    static toOkLab(input) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.toOkLab(item));
+        const rgb = ColorLab.#toRgbChannels(input);
+        if (!rgb) return null;
+        const ch = ColorLab.#ENGINE.RGB_OKLAB(rgb);
+        return ch.A === 1 ?
+            `oklab(${ch.L} ${ch.a} ${ch.b})` :
+            `oklab(${ch.L} ${ch.a} ${ch.b} / ${ch.A})`;
+    }
+    static toOkLch(input) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.toOkLch(item));
+        const rgb = ColorLab.#toRgbChannels(input);
+        if (!rgb) return null;
+        const ch = ColorLab.#ENGINE.RGB_OKLCH(rgb);
+        return ch.A === 1 ?
+            `oklch(${ch.L} ${ch.C} ${ch.H}deg)` :
+            `oklch(${ch.L} ${ch.C} ${ch.H}deg / ${ch.A})`;
+    }
+    static toOkHsl(input) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.toOkHsl(item));
+        const rgb = ColorLab.#toRgbChannels(input);
+        if (!rgb) return null;
+        const ch = ColorLab.#ENGINE.RGB_OKHSL(rgb);
+        return ch.A === 1 ?
+            `okhsl(${ch.H}deg ${ch.S}% ${ch.L}%)` :
+            `okhsl(${ch.H}deg ${ch.S}% ${ch.L}% / ${ch.A})`;
+    }
+    static toOkHsv(input) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.toOkHsv(item));
+        const rgb = ColorLab.#toRgbChannels(input);
+        if (!rgb) return null;
+        const ch = ColorLab.#ENGINE.RGB_OKHSV(rgb);
+        return ch.A === 1 ?
+            `okhsv(${ch.H}deg ${ch.S}% ${ch.V}%)` :
+            `okhsv(${ch.H}deg ${ch.S}% ${ch.V}% / ${ch.A})`;
+    }
+
     // Shading
-    static hue() {};
-    static okhue() {};
-    static tint() {};
-    static tone() {};
-    static shade() {};
-    static ray() {};
-    
+    static hue(input, degrees = 180) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.hue(item, degrees));
+        const hsl = ColorLab.channels(ColorLab.toHsl(input));
+        if (!hsl) return null;
+        hsl.H = ColorLab.#normalizeHue(hsl.H + degrees);
+        return ColorLab.toHex(hsl);
+    }
+    static okhue(input, degrees = 180) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.okhue(item, degrees));
+        const okhsl = ColorLab.channels(ColorLab.toOkHsl(input));
+        if (!okhsl) return null;
+        okhsl.H = ColorLab.#normalizeHue(okhsl.H + degrees);
+        return ColorLab.toHex(okhsl);
+    }
+    static tint(input, ratio = 0.5) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.tint(item, ratio));
+        const hsl = ColorLab.channels(ColorLab.toHsl(input));
+        if (!hsl) return null;
+        hsl.L = Math.round(ColorLab.#clamp(hsl.L + (100 - hsl.L) * ratio, 0, 100));
+        return ColorLab.toHex(hsl);
+    }
+    static tone(input, ratio = 0.5) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.tone(item, ratio));
+        const hsl = ColorLab.channels(ColorLab.toHsl(input));
+        if (!hsl) return null;
+        hsl.S = Math.round(ColorLab.#clamp(hsl.S * (1 - ratio), 0, 100));
+        return ColorLab.toHex(hsl);
+    }
+    static shade(input, ratio = 0.5) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.shade(item, ratio));
+        const hsl = ColorLab.channels(ColorLab.toHsl(input));
+        if (!hsl) return null;
+        hsl.L = Math.round(ColorLab.#clamp(hsl.L * (1 - ratio), 0, 100));
+        return ColorLab.toHex(hsl);
+    }
+    static ray(input, ratio = 0.5) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.ray(item, ratio));
+        const okhsl = ColorLab.channels(ColorLab.toOkHsl(input));
+        if (!okhsl) return null;
+        okhsl.L = Math.round(ColorLab.#clamp(okhsl.L * (1 - ratio), 0, 100));
+        return ColorLab.toHex(okhsl);
+    }
+        
     // Get Detail
-    static getRed() {};
-    static getGreen() {};
-    static getBlue() {};
-    static getAlpha() {};
-    static getHue() {};
-    static getSaturation() {};
-    static getLightness() {};
-    static getCyan() {};
-    static getMagenta() {};
-    static getYellow() {};
-    static getKey() {};
-    static getValue() {};
-    static getRay() {};
+    static getRed(input) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.getRed(item));
+        const rgb = ColorLab.channels(ColorLab.toRgb(input));
+        return rgb ? rgb.R : null;
+    }
+    static getGreen(input) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.getGreen(item));
+        const rgb = ColorLab.channels(ColorLab.toRgb(input));
+        return rgb ? rgb.G : null;
+    }
+    static getBlue(input) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.getBlue(item));
+        const rgb = ColorLab.channels(ColorLab.toRgb(input));
+        return rgb ? rgb.B : null;
+    }
+    static getAlpha(input) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.getAlpha(item));
+        const rgb = ColorLab.channels(ColorLab.toRgb(input));
+        return rgb ? rgb.A : null;
+    }
+    static getHue(input) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.getHue(item));
+        const hsl = ColorLab.channels(ColorLab.toHsl(input));
+        return hsl ? hsl.H : null;
+    }
+    static getSaturation(input) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.getSaturation(item));
+        const hsl = ColorLab.channels(ColorLab.toHsl(input));
+        return hsl ? hsl.S : null;
+    }
+    static getLightness(input) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.getLightness(item));
+        const hsl = ColorLab.channels(ColorLab.toHsl(input));
+        return hsl ? hsl.L : null;
+    }
+    static getCyan(input) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.getCyan(item));
+        const cmyk = ColorLab.channels(ColorLab.toCmyk(input));
+        return cmyk ? cmyk.C : null;
+    }
+    static getMagenta(input) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.getMagenta(item));
+        const cmyk = ColorLab.channels(ColorLab.toCmyk(input));
+        return cmyk ? cmyk.M : null;
+    }
+    static getYellow(input) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.getYellow(item));
+        const cmyk = ColorLab.channels(ColorLab.toCmyk(input));
+        return cmyk ? cmyk.Y : null;
+    }
+    static getKey(input) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.getKey(item));
+        const cmyk = ColorLab.channels(ColorLab.toCmyk(input));
+        return cmyk ? cmyk.K : null;
+    }
+    static getValue(input) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.getValue(item));
+        const hsv = ColorLab.channels(ColorLab.toHsv(input));
+        return hsv ? hsv.V : null;
+    }
+    static getRay(input) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.getRay(item));
+        const okhsl = ColorLab.channels(ColorLab.toOkHsl(input));
+        return okhsl ? okhsl.L : null;
+    }
+    static getOkHue(input) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.getOkHue(item));
+        const okhsl = ColorLab.channels(ColorLab.toOkHsl(input));
+        return okhsl ? okhsl.H : null;
+    }
     
     // Change Detail
-    static changeRed() {};
-    static changeGreen() {};
-    static changeBlue() {};
-    static changeAlpha() {};
-    static changeHue() {};
-    static changeSaturation() {};
-    static changeLightness() {};
-    static changeCyan() {};
-    static changeMagenta() {};
-    static changeYellow() {};
-    static changeKey() {};
-    static changeValue() {};
-    static changeRay() {};
+    static changeRed(input, value) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.changeRed(item, value));
+        const rgb = ColorLab.channels(ColorLab.toRgb(input));
+        if (!rgb) return null;
+        rgb.R = Math.round(ColorLab.#clamp(value, 0, 255));
+        return ColorLab.toHex(rgb);
+    }
+    static changeGreen(input, value) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.changeGreen(item, value));
+        const rgb = ColorLab.channels(ColorLab.toRgb(input));
+        if (!rgb) return null;
+        rgb.G = Math.round(ColorLab.#clamp(value, 0, 255));
+        return ColorLab.toHex(rgb);
+    }
+    static changeBlue(input, value) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.changeBlue(item, value));
+        const rgb = ColorLab.channels(ColorLab.toRgb(input));
+        if (!rgb) return null;
+        rgb.B = Math.round(ColorLab.#clamp(value, 0, 255));
+        return ColorLab.toHex(rgb);
+    }
+    static changeAlpha(input, value) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.changeAlpha(item, value));
+        const rgb = ColorLab.channels(ColorLab.toRgb(input));
+        if (!rgb) return null;
+        rgb.A = parseFloat(ColorLab.#clamp(value, 0, 1).toFixed(2));
+        return ColorLab.toHex(rgb);
+    }
+    static changeHue(input, value) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.changeHue(item, value));
+        const hsl = ColorLab.channels(ColorLab.toHsl(input));
+        if (!hsl) return null;
+        hsl.H = ColorLab.#normalizeHue(value);
+        return ColorLab.toHex(hsl);
+    }
+    static changeSaturation(input, value) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.changeSaturation(item, value));
+        const hsl = ColorLab.channels(ColorLab.toHsl(input));
+        if (!hsl) return null;
+        hsl.S = Math.round(ColorLab.#clamp(value, 0, 100));
+        return ColorLab.toHex(hsl);
+    }
+    static changeLightness(input, value) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.changeLightness(item, value));
+        const hsl = ColorLab.channels(ColorLab.toHsl(input));
+        if (!hsl) return null;
+        hsl.L = Math.round(ColorLab.#clamp(value, 0, 100));
+        return ColorLab.toHex(hsl);
+    }
+    static changeCyan(input, value) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.changeCyan(item, value));
+        const cmyk = ColorLab.channels(ColorLab.toCmyk(input));
+        if (!cmyk) return null;
+        cmyk.C = Math.round(ColorLab.#clamp(value, 0, 100));
+        return ColorLab.toHex(cmyk);
+    }
+    static changeMagenta(input, value) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.changeMagenta(item, value));
+        const cmyk = ColorLab.channels(ColorLab.toCmyk(input));
+        if (!cmyk) return null;
+        cmyk.M = Math.round(ColorLab.#clamp(value, 0, 100));
+        return ColorLab.toHex(cmyk);
+    }
+    static changeYellow(input, value) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.changeYellow(item, value));
+        const cmyk = ColorLab.channels(ColorLab.toCmyk(input));
+        if (!cmyk) return null;
+        cmyk.Y = Math.round(ColorLab.#clamp(value, 0, 100));
+        return ColorLab.toHex(cmyk);
+    }
+    static changeKey(input, value) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.changeKey(item, value));
+        const cmyk = ColorLab.channels(ColorLab.toCmyk(input));
+        if (!cmyk) return null;
+        cmyk.K = Math.round(ColorLab.#clamp(value, 0, 100));
+        return ColorLab.toHex(cmyk);
+    }
+    static changeValue(input, value) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.changeValue(item, value));
+        const hsv = ColorLab.channels(ColorLab.toHsv(input));
+        if (!hsv) return null;
+        hsv.V = Math.round(ColorLab.#clamp(value, 0, 100));
+        return ColorLab.toHex(hsv);
+    }
+    static changeRay(input, value) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.changeRay(item, value));
+        const okhsl = ColorLab.channels(ColorLab.toOkHsl(input));
+        if (!okhsl) return null;
+        okhsl.L = Math.round(ColorLab.#clamp(value, 0, 100));
+        return ColorLab.toHex(okhsl);
+    }
+    static changeOkHue(input, value) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.changeOkHue(item, value));
+        const okhsl = ColorLab.channels(ColorLab.toOkHsl(input));
+        if (!okhsl) return null;
+        okhsl.H = ColorLab.#normalizeHue(value);
+        return ColorLab.toHex(okhsl);
+    }
     
     // Contrast
-    static getContrast() {};
-    static getContrastLevel() {};
-    static getBestContrastColor() {};
+    static getContrast(color1, color2) {
+        if (Array.isArray(color1)) return color1.map(c => ColorLab.getContrast(c, color2));
+        if (Array.isArray(color2)) return color2.map(c => ColorLab.getContrast(color1, c));
+        
+        const { rWeight, gWeight, bWeight, offset } = ColorLab.#WCAG_CONSTANTS;
+        
+        const luminance = (color) => {
+            const rgb = ColorLab.channels(ColorLab.toRgb(color));
+            if (!rgb) return 0;
+            const R = ColorLab.#srgbToLinear(rgb.R);
+            const G = ColorLab.#srgbToLinear(rgb.G);
+            const B = ColorLab.#srgbToLinear(rgb.B);
+            return rWeight * R + gWeight * G + bWeight * B;
+        };
+        
+        const L1 = luminance(color1);
+        const L2 = luminance(color2);
+        const ratio = (Math.max(L1, L2) + offset) / (Math.min(L1, L2) + offset);
+        return Number(ratio.toFixed(2));
+    }
+    static getContrastLevel(ratio) {
+        if (Array.isArray(ratio)) return ratio.map(r => ColorLab.getContrastLevel(r));
+        const { levels } = ColorLab.#WCAG_CONSTANTS;
+        ratio = parseFloat(ratio);
+        if (ratio >= levels.AAA) return 'AAA';
+        if (ratio >= levels.AA) return 'AA';
+        if (ratio >= levels.A) return 'A';
+        return 'Fail';
+    }
+    static getBestContrastColor(bgColor) {
+        if (Array.isArray(bgColor)) return bgColor.map(c => ColorLab.getBestContrastColor(c));
+        
+        const white = '#FFFFFF';
+        const black = '#000000';
+        
+        const contrastWithWhite = ColorLab.getContrast(bgColor, white);
+        const contrastWithBlack = ColorLab.getContrast(bgColor, black);
+        
+        return contrastWithWhite >= contrastWithBlack ? white : black;
+    }
     
     // Harmonies
-    static getHarmonies() {};
+    static getHarmonies(input) {
+        if (Array.isArray(input)) return input.map(item => ColorLab.getHarmonies(item));
     
+        const hsl = ColorLab.channels(ColorLab.toHsl(input));
+        if (!hsl) return null;
+    
+        const { H, S, L, A } = hsl;
+        const result = {};
+    
+        for (const [name, deltas] of Object.entries(ColorLab.#HARMONIES)) {
+            result[name] = deltas.map(d => {
+                const newH = ColorLab.#normalizeHue(H + d);
+                return ColorLab.toHex({ H: newH, S, L, A });
+            });
+        }
+    
+        return result;
+    }
+        
     // Mix
-    static mix() {};
+    static mix(color1, color2, ratio = 0.5) {
+        if (Array.isArray(color1)) return color1.map(c => ColorLab.mix(c, color2, ratio));
+        if (Array.isArray(color2)) return color2.map(c => ColorLab.mix(color1, c, ratio));
     
-    // convert 
-    static convert() {};
+        const a = ColorLab.channels(ColorLab.toRgb(color1));
+        const b = ColorLab.channels(ColorLab.toRgb(color2));
+        if (!a || !b) return null;
+    
+        const r = ColorLab.#clamp(ratio, 0, 1);
+        const R = Math.round(a.R + (b.R - a.R) * r);
+        const G = Math.round(a.G + (b.G - a.G) * r);
+        const B = Math.round(a.B + (b.B - a.B) * r);
+        const A = parseFloat((a.A + (b.A - a.A) * r).toFixed(2));
+    
+        return ColorLab.toHex({ R, G, B, A });
+    }
+    static okmix(color1, color2, ratio = 0.5) {
+        if (Array.isArray(color1)) return color1.map(c => ColorLab.okmix(c, color2, ratio));
+        if (Array.isArray(color2)) return color2.map(c => ColorLab.okmix(color1, c, ratio));
+    
+        const lab1 = ColorLab.channels(ColorLab.toOkLab(color1));
+        const lab2 = ColorLab.channels(ColorLab.toOkLab(color2));
+        if (!lab1 || !lab2) return null;
+    
+        const r = ColorLab.#clamp(ratio, 0, 1);
+        const L = lab1.L + (lab2.L - lab1.L) * r;
+        const a = lab1.a + (lab2.a - lab1.a) * r;
+        const b = lab1.b + (lab2.b - lab1.b) * r;
+        const A = parseFloat((lab1.A + (lab2.A - lab1.A) * r).toFixed(2));
+    
+        return ColorLab.toHex({ L, a, b, A });
+    }
+    static hueMix(color1, color2, ratio = 0.5) {
+        if (Array.isArray(color1)) return color1.map(c => ColorLab.hueMix(c, color2, ratio));
+        if (Array.isArray(color2)) return color2.map(c => ColorLab.hueMix(color1, c, ratio));
+    
+        const lch1 = ColorLab.channels(ColorLab.toOkLch(color1));
+        const lch2 = ColorLab.channels(ColorLab.toOkLch(color2));
+        if (!lch1 || !lch2) return null;
+    
+        const r = ColorLab.#clamp(ratio, 0, 1);
+    
+        const L = lch1.L + (lch2.L - lch1.L) * r;
+        const C = lch1.C + (lch2.C - lch1.C) * r;
+    
+        let dH = lch2.H - lch1.H;
+        if (dH > 180) dH -= 360;
+        if (dH < -180) dH += 360;
+        const H = ColorLab.#normalizeHue(lch1.H + dH * r);
+    
+        const A = parseFloat((lch1.A + (lch2.A - lch1.A) * r).toFixed(2));
+    
+        return ColorLab.toHex({ L, C, H, A });
+    }
 }
